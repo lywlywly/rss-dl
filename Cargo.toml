@@ -1,0 +1,17 @@
+[package]
+name = "rss_dl"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+futures = "0.3"
+once_cell = "1"
+quick-xml = { version = "0.37", features = ["serialize"] }
+regex = "1"
+reqwest = "0.12"
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
+strfmt = "0.2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+urlencoding = "2"

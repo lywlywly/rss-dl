@@ -1,0 +1,9 @@
+Some Anime:
+  update_time: 19:00:00 # UTC
+  keyword: search keyword
+  pattern: \[Some Anime\]\[(.*)\]\[1080P\]\[MP4\].* # captures episode number
+  start_date: 2025-01-10 # UTC
+  latest_downloaded: 15
+  offset: 13 # optional (when across seasons)
+  rename_pattern: Some Anime S01E{ep} # optional
+  target_directory: /some/directory/Series/Some Anime (2023)/Season 01  # optional
