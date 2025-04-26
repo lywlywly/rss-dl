@@ -77,12 +77,12 @@ impl<T: Ord> QueueType<T> {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(transparent)]
 pub struct TextNode(#[serde(rename = "$value")] pub String);
 
 #[allow(dead_code)]
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct Guid {
     #[serde(rename = "$value")]
     pub value: String,
@@ -91,7 +91,7 @@ pub struct Guid {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct Enclosure {
     #[serde(rename = "@url")]
     pub url: String,
@@ -102,7 +102,7 @@ pub struct Enclosure {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct Category {
     #[serde(rename = "$value")]
     pub value: String,
@@ -111,7 +111,7 @@ pub struct Category {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct Item {
     pub title: TextNode,
     pub link: TextNode,
@@ -230,26 +230,39 @@ impl fmt::Display for MatchError {
 
 impl std::error::Error for MatchError {}
 
-fn match_item_by_title(mut rss: Rss, pattern: &Regex, ep: u32) -> Result<Item, MatchError> {
-    let mut matches: Vec<Item> = rss
-        .channel
-        .item
-        .drain(..)
-        .filter(|item| {
-            if let Some(caps) = pattern.captures(&item.title.0) {
-                if let Some(episode_str) = caps.get(1) {
-                    return episode_str.as_str().parse::<u32>().ok() == Some(ep);
-                }
-            }
-            false
-        })
-        .collect();
+fn match_item_by_title<'a>(
+    rss: &'a Rss,
+    pattern: &Regex,
+    expected_episode: u32,
+) -> Result<&'a Item, MatchError> {
+    let mut matches = rss.channel.item.iter().filter(|item| {
+        pattern
+            .captures(&item.title.0)
+            .and_then(|caps| caps.get(1))
+            .and_then(|episode_str| episode_str.as_str().parse::<u32>().ok())
+            .map_or(false, |ep| ep == expected_episode)
+    });
 
-    match matches.len() {
-        1 => Ok(matches.remove(0)),
-        0 => Err(MatchError::NoMatch(ep)), // TODO
-        _ => Err(MatchError::MultipleMatches(ep)),
+    match (matches.next(), matches.next()) {
+        (Some(first_match), None) => Ok(first_match), // exactly one match
+        (None, _) => Err(MatchError::NoMatch(expected_episode)), // no matches
+        (Some(_), Some(_)) => Err(MatchError::MultipleMatches(expected_episode)), // more than one match
     }
+}
+
+fn match_item_by_patterns<'a>(
+    rss: &'a Rss,
+    patterns: &'a Vec<Regex>,
+    ep: u32,
+) -> Result<&'a Item, MatchError> {
+    for pattern in patterns {
+        match match_item_by_title(rss, pattern, ep) {
+            Ok(item) => return Ok(item),
+            Err(MatchError::NoMatch(_)) => continue,
+            Err(MatchError::MultipleMatches(_)) => return Err(MatchError::MultipleMatches(ep)),
+        }
+    }
+    Err(MatchError::NoMatch(ep))
 }
 
 pub async fn wait_until(target: DateTime<Utc>) {
@@ -284,7 +297,7 @@ pub async fn fetch_rss_by_keyword(keyword: &str) -> Result<Rss, Box<dyn Error>> 
 
 pub async fn fetch_and_match_rss_blocking(
     keyword: &str,
-    pattern: &Regex,
+    pattern: &Vec<Regex>,
     expected_episode: u32,
 ) -> Result<Item, Box<dyn Error>> {
     loop {
@@ -295,8 +308,8 @@ pub async fn fetch_and_match_rss_blocking(
 
         let rss = fetch_rss_by_keyword(keyword).await.unwrap();
 
-        match match_item_by_title(rss, pattern, expected_episode) {
-            Ok(item) => return Ok(item),
+        match match_item_by_patterns(&rss, pattern, expected_episode) {
+            Ok(item) => return Ok(item.clone()),
             Err(MatchError::NoMatch(_)) => {
                 println!("No match found. Retrying in 5 minutes...");
                 sleep(Duration::from_secs(5 * 60)).await;
@@ -483,7 +496,11 @@ pub fn build_tasks() -> Result<Vec<Task>, Box<dyn std::error::Error>> {
                 Utc,
             );
 
-            let pattern = Regex::new(&config.pattern)?;
+            let pattern: Vec<Regex> = config
+                .pattern
+                .iter()
+                .map(|s| Regex::new(s).unwrap())
+                .collect();
 
             Ok(Task {
                 name: name.to_string(),
