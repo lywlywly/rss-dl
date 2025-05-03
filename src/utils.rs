@@ -530,7 +530,11 @@ pub async fn process_tasks<'a>(
             let task_ref = queue.dequeue().unwrap();
             in_progress.push(process_task(task_ref));
         }
-        in_progress.next().await;
+        if let Some(result) = in_progress.next().await {
+            result?;
+        } else {
+            println!("all tasks completed.");
+        }
     }
 
     Ok(())
