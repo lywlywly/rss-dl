@@ -14,6 +14,7 @@ pub struct SeriesConfig {
     pub offset: Option<u32>,
     pub rename_pattern: Option<String>,
     pub target_directory: Option<String>,
+    pub skip: Option<u32>,
 }
 
 fn single_or_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>

@@ -440,8 +440,9 @@ pub fn update_task(task: &Task) {
 
 pub async fn process_task(current_task: &Task) -> Result<(), Box<dyn Error>> {
     println!(
-        "Waiting for {} at {}",
+        "Waiting for {} Episode {} at {}",
         current_task.name,
+        current_task.episode,
         current_task
             .scheduled_time
             .with_timezone(&chrono::Local)
@@ -492,7 +493,10 @@ pub fn build_tasks() -> Result<Vec<Task>, Box<dyn std::error::Error>> {
         .map(|(name, config)| {
             let naive_dt = config.start_date.and_time(config.update_time);
             let scheduled_time = DateTime::from_naive_utc_and_offset(
-                naive_dt + chrono::Duration::days((config.latest_downloaded * 7) as i64),
+                naive_dt
+                    + chrono::Duration::days(
+                        ((config.latest_downloaded + config.skip.unwrap_or(0)) * 7) as i64,
+                    ),
                 Utc,
             );
 

@@ -9,3 +9,4 @@ Some Anime:
   offset: 13 # optional (when across seasons)
   rename_pattern: Some Anime S01E{ep} # optional
   target_directory: /some/directory/Series/Some Anime (2023)/Season 01 # optional
+  skip: 1 # +1 for every episode that is postponed
