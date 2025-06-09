@@ -15,6 +15,7 @@ pub struct SeriesConfig {
     pub rename_pattern: Option<String>,
     pub target_directory: Option<String>,
     pub skip: Option<u32>,
+    pub feed_url: Option<String>,
 }
 
 fn single_or_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
@@ -44,6 +45,7 @@ pub struct Task {
     pub offset: Option<u32>,
     pub rename_pattern: Option<String>,
     pub target_directory: Option<String>,
+    pub feed_url: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

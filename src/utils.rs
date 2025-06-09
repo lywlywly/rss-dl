@@ -114,27 +114,12 @@ pub struct Category {
 #[derive(Clone, Debug, Deserialize)]
 pub struct Item {
     pub title: TextNode,
-    pub link: TextNode,
-    pub description: TextNode,
-    pub guid: Guid,
-    pub author: TextNode,
     pub enclosure: Enclosure,
-    #[serde(rename = "pubDate")]
-    pub pub_date: TextNode,
-    pub category: Category,
 }
 
 #[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct Channel {
-    pub title: TextNode,
-    pub link: TextNode,
-    pub description: TextNode,
-    #[serde(rename = "lastBuildDate")]
-    pub last_build_date: TextNode,
-    pub language: TextNode,
-    pub generator: TextNode,
-    pub copyright: TextNode,
     pub item: Vec<Item>,
 }
 
@@ -282,13 +267,21 @@ pub fn write_to_config() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-pub async fn fetch_rss_by_keyword(keyword: &str) -> Result<Rss, Box<dyn Error>> {
+pub async fn fetch_rss_by_keyword(
+    keyword: &str,
+    feed_url: Option<&str>,
+) -> Result<Rss, Box<dyn Error>> {
     let mut vars = HashMap::new();
     vars.insert(
         "keyword".to_string(),
         urlencoding::encode(keyword).into_owned(),
     );
-    let full_url = strfmt(&GLOBAL_CONFIG.lock().unwrap().feed_url, &vars)?;
+
+    let template: &str = match feed_url {
+        Some(s) => s,
+        None => &GLOBAL_CONFIG.lock().unwrap().feed_url,
+    };
+    let full_url = strfmt(template, &vars)?;
     let response = get(&full_url).await?;
     let bytes = response.bytes().await?;
     let rss: Rss = from_reader(bytes.as_ref())?;
@@ -299,6 +292,7 @@ pub async fn fetch_and_match_rss_blocking(
     keyword: &str,
     pattern: &Vec<Regex>,
     expected_episode: u32,
+    feed_url: Option<&str>,
 ) -> Result<Item, Box<dyn Error>> {
     loop {
         println!(
@@ -306,7 +300,7 @@ pub async fn fetch_and_match_rss_blocking(
             keyword, expected_episode
         );
 
-        let rss = fetch_rss_by_keyword(keyword).await.unwrap();
+        let rss = fetch_rss_by_keyword(keyword, feed_url).await.unwrap();
 
         match match_item_by_patterns(&rss, pattern, expected_episode) {
             Ok(item) => return Ok(item.clone()),
@@ -345,9 +339,58 @@ pub fn check_status_output(output: &str) -> Result<(State, String, String), Box<
     Ok((state, path, filename))
 }
 
+/// Converts a torrent hash (hex or base32) into a hex-encoded string.
+/// Returns an error if the input is not a valid hex or base32-encoded SHA-1 hash.
+fn to_hex_info_hash(input: &str) -> Result<String, String> {
+    // Try parsing as hex
+    if input.len() == 40 && input.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Ok(input.to_ascii_lowercase());
+    }
+
+    // Try parsing as Base32 (assuming uppercase, common in magnet links)
+    let base32_input = input.to_ascii_uppercase();
+    if base32_input.len() != 32 {
+        return Err("Invalid length for base32".into());
+    }
+
+    let base32_alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    let mut bits = 0u64;
+    let mut bit_buffer = 0u32;
+    let mut output = Vec::new();
+
+    for c in base32_input.chars() {
+        let value = base32_alphabet
+            .find(c)
+            .ok_or_else(|| format!("Invalid base32 character: {}", c))?;
+
+        bit_buffer = (bit_buffer << 5) | (value as u32);
+        bits += 5;
+
+        while bits >= 8 {
+            bits -= 8;
+            output.push((bit_buffer >> bits) as u8);
+            bit_buffer &= (1 << bits) - 1;
+        }
+    }
+
+    if output.len() != 20 {
+        return Err(format!(
+            "Decoded base32 length is {}, expected 20",
+            output.len()
+        ));
+    }
+
+    Ok(output.iter().map(|b| format!("{:02x}", b)).collect())
+}
+
 pub fn check_status(hash: &str) -> Result<(State, String, String), Box<dyn Error>> {
     let output = Command::new("qbt")
-        .args(["torrent", "list", "--hashes", hash])
+        .args([
+            "torrent",
+            "list",
+            "--hashes",
+            &to_hex_info_hash(hash).unwrap(),
+        ])
         .output()?;
 
     if !output.status.success() {
@@ -363,7 +406,6 @@ pub async fn download_async(magnet: &str) -> Result<(String, String), Box<dyn Er
 
     download(magnet)?;
     sleep(Duration::from_secs(10)).await;
-
     loop {
         let (status, download_path, file_name) = check_status(&hash)?; // or async
         println!("{:?}", status);
@@ -410,8 +452,13 @@ pub fn download(magnet_link: &str) -> Result<(), Box<dyn Error>> {
 
 pub fn pause(hash: &str) -> Result<(), Box<dyn Error>> {
     let output = Command::new("qbt")
-        .args(["torrent", "pause", "--hashes", hash])
-        .output()?;
+        .args([
+            "torrent",
+            "pause",
+            "--hashes",
+            &to_hex_info_hash(hash).unwrap(),
+        ])
+        .output()?;;
 
     if output.status.success() {
         // println!("{}", String::from_utf8_lossy(&output.stderr)); FIXME: the library writes to stderr
@@ -455,10 +502,14 @@ pub async fn process_task(current_task: &Task) -> Result<(), Box<dyn Error>> {
         current_task.name
     );
     let episode = current_task.episode + current_task.offset.unwrap_or(0);
-    let result =
-        fetch_and_match_rss_blocking(&current_task.keyword, &current_task.pattern, episode)
-            .await
-            .unwrap();
+    let result = fetch_and_match_rss_blocking(
+        &current_task.keyword,
+        &current_task.pattern,
+        episode,
+        current_task.feed_url.as_deref(),
+    )
+    .await
+    .unwrap();
     let magnet_link = &result.enclosure.url;
     let (download_path, file_name) = download_async(magnet_link).await.unwrap();
     if let (Some(rename_pattern), Some(target_directory)) =
@@ -515,6 +566,7 @@ pub fn build_tasks() -> Result<Vec<Task>, Box<dyn std::error::Error>> {
                 offset: config.offset,
                 rename_pattern: config.rename_pattern.clone(),
                 target_directory: config.target_directory.clone(),
+                feed_url: config.feed_url.clone(),
             })
         })
         .collect()
