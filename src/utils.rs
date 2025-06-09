@@ -458,7 +458,7 @@ pub fn pause(hash: &str) -> Result<(), Box<dyn Error>> {
             "--hashes",
             &to_hex_info_hash(hash).unwrap(),
         ])
-        .output()?;;
+        .output()?;
 
     if output.status.success() {
         // println!("{}", String::from_utf8_lossy(&output.stderr)); FIXME: the library writes to stderr
@@ -479,13 +479,18 @@ pub fn _check_qbt_availability() -> bool {
         .map_or(false, |status| status.success())
 }
 
-pub fn update_task(task: &Task) {
+pub fn update_task(mut task: Task) -> Result<Task, Box<dyn Error>> {
     if let Some(config) = GLOBAL_MAP.lock().unwrap().get_mut(&task.name) {
         config.latest_downloaded = task.episode;
     }
+    task.episode += 1;
+
+    write_to_config()?;
+
+    Ok(task)
 }
 
-pub async fn process_task(current_task: &Task) -> Result<(), Box<dyn Error>> {
+pub async fn process_task(current_task: Task) -> Result<Task, Box<dyn Error>> {
     println!(
         "Waiting for {} Episode {} at {}",
         current_task.name,
@@ -523,7 +528,6 @@ pub async fn process_task(current_task: &Task) -> Result<(), Box<dyn Error>> {
             target_directory,
         )?;
     }
-    update_task(&current_task);
     println!(
         "Adding task {} Episode {} Scheduled at {}",
         current_task.name,
@@ -533,7 +537,8 @@ pub async fn process_task(current_task: &Task) -> Result<(), Box<dyn Error>> {
             .with_timezone(&chrono::Local)
             .to_rfc2822()
     );
-    Ok(write_to_config()?)
+
+    Ok(update_task(current_task).unwrap())
 }
 
 pub fn build_tasks() -> Result<Vec<Task>, Box<dyn std::error::Error>> {
@@ -573,7 +578,7 @@ pub fn build_tasks() -> Result<Vec<Task>, Box<dyn std::error::Error>> {
 }
 
 pub async fn process_tasks<'a>(
-    tasks: impl IntoIterator<Item = &'a Task>,
+    tasks: impl IntoIterator<Item = Task>,
     use_priority_queue: bool,
     concurrency_limit: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -587,7 +592,7 @@ pub async fn process_tasks<'a>(
             in_progress.push(process_task(task_ref));
         }
         if let Some(result) = in_progress.next().await {
-            result?;
+            queue.enqueue(result?);
         } else {
             println!("all tasks completed.");
         }
