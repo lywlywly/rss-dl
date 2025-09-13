@@ -1,5 +1,5 @@
 use crate::globals::{GLOBAL_CONFIG, GLOBAL_MAP};
-use crate::types::{SeriesConfig, Task};
+use crate::types::Task;
 use chrono::{DateTime, Utc};
 use futures::stream::{FuturesUnordered, StreamExt};
 use quick_xml::de::from_reader;
@@ -11,7 +11,6 @@ use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::error::Error;
 use std::path::Path;
 use std::process::Command;
-use std::sync::MutexGuard;
 use std::{fmt, fs};
 use strfmt::strfmt;
 use tokio::time::{Duration, sleep};
@@ -200,15 +199,15 @@ pub fn rename_video(
 
 #[derive(Debug)]
 pub enum MatchError {
-    NoMatch(u32),
-    MultipleMatches(u32),
+    NoMatch,
+    MultipleMatches(Vec<String>),
 }
 
 impl fmt::Display for MatchError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            MatchError::NoMatch(ep) => write!(f, "No item matched episode {}", ep),
-            MatchError::MultipleMatches(ep) => write!(f, "Multiple items matched episode {}", ep),
+            MatchError::NoMatch => write!(f, "No item matched"),
+            MatchError::MultipleMatches(_) => write!(f, "Multiple items matched"),
         }
     }
 }
@@ -230,8 +229,11 @@ fn match_item_by_title<'a>(
 
     match (matches.next(), matches.next()) {
         (Some(first_match), None) => Ok(first_match), // exactly one match
-        (None, _) => Err(MatchError::NoMatch(expected_episode)), // no matches
-        (Some(_), Some(_)) => Err(MatchError::MultipleMatches(expected_episode)), // more than one match
+        (None, _) => Err(MatchError::NoMatch),        // no matches
+        (Some(m1), Some(m2)) => Err(MatchError::MultipleMatches(vec![
+            m1.title.0.clone(),
+            m2.title.0.clone(),
+        ])), // more than one match
     }
 }
 
@@ -243,11 +245,11 @@ fn match_item_by_patterns<'a>(
     for pattern in patterns {
         match match_item_by_title(rss, pattern, ep) {
             Ok(item) => return Ok(item),
-            Err(MatchError::NoMatch(_)) => continue,
-            Err(MatchError::MultipleMatches(_)) => return Err(MatchError::MultipleMatches(ep)),
+            Err(MatchError::NoMatch) => continue,
+            Err(e @ MatchError::MultipleMatches(_)) => return Err(e),
         }
     }
-    Err(MatchError::NoMatch(ep))
+    Err(MatchError::NoMatch)
 }
 
 pub async fn wait_until(target: DateTime<Utc>) {
@@ -260,8 +262,8 @@ pub async fn wait_until(target: DateTime<Utc>) {
     }
 }
 
-pub fn write_to_config() -> Result<(), Box<dyn std::error::Error>> {
-    let guard: MutexGuard<'_, HashMap<String, SeriesConfig>> = GLOBAL_MAP.lock().unwrap();
+pub async fn write_to_config() -> Result<(), Box<dyn std::error::Error>> {
+    let guard = GLOBAL_MAP.lock().await;
     let yaml = serde_yaml::to_string(&*guard)?;
     fs::write("tasks.yaml", yaml)?;
     Ok(())
@@ -279,7 +281,7 @@ pub async fn fetch_rss_by_keyword(
 
     let template: &str = match feed_url {
         Some(s) => s,
-        None => &GLOBAL_CONFIG.lock().unwrap().feed_url,
+        None => &GLOBAL_CONFIG.lock().await.feed_url,
     };
     let full_url = strfmt(template, &vars)?;
     let response = get(&full_url).await?;
@@ -304,11 +306,22 @@ pub async fn fetch_and_match_rss_blocking(
 
         match match_item_by_patterns(&rss, pattern, expected_episode) {
             Ok(item) => return Ok(item.clone()),
-            Err(MatchError::NoMatch(_)) => {
-                println!("No match found. Retrying in 5 minutes...");
+            Err(MatchError::NoMatch) => {
+                println!(
+                    "No match found for keyword {}, episode: {}. Retrying in 5 minutes...",
+                    keyword, expected_episode
+                );
                 sleep(Duration::from_secs(5 * 60)).await;
             }
-            Err(e) => return Err(Box::new(e)),
+            Err(e) => {
+                if let MatchError::MultipleMatches(v) = &e {
+                    println!(
+                        "Multiple matches found for keyword {}, episode: {}. Match 1: {}. Match 2: {}",
+                        keyword, expected_episode, v[0], v[1]
+                    );
+                }
+                return Err(Box::new(e));
+            }
         }
     }
 }
@@ -417,7 +430,7 @@ pub async fn download_async(magnet: &str) -> Result<(String, String), Box<dyn Er
                 return Ok((download_path, file_name));
             }
             _ => {
-                println!("Still downloading...");
+                println!("Still downloading: {}", file_name);
                 sleep(Duration::from_secs(30)).await;
             }
         }
@@ -479,13 +492,14 @@ pub fn _check_qbt_availability() -> bool {
         .map_or(false, |status| status.success())
 }
 
-pub fn update_task(mut task: Task) -> Result<Task, Box<dyn Error>> {
-    if let Some(config) = GLOBAL_MAP.lock().unwrap().get_mut(&task.name) {
+pub async fn update_task(mut task: Task) -> Result<Task, Box<dyn Error>> {
+    if let Some(config) = GLOBAL_MAP.lock().await.get_mut(&task.name) {
         config.latest_downloaded = task.episode;
     }
-    task.episode += 1;
+    write_to_config().await?;
 
-    write_to_config()?;
+    task.episode += 1;
+    task.scheduled_time += chrono::Duration::days(7);
 
     Ok(task)
 }
@@ -528,23 +542,24 @@ pub async fn process_task(current_task: Task) -> Result<Task, Box<dyn Error>> {
             target_directory,
         )?;
     }
+    let new_task = update_task(current_task).await.unwrap();
     println!(
         "Adding task {} Episode {} Scheduled at {}",
-        current_task.name,
-        current_task.episode,
-        current_task
+        new_task.name,
+        new_task.episode,
+        new_task
             .scheduled_time
             .with_timezone(&chrono::Local)
             .to_rfc2822()
     );
 
-    Ok(update_task(current_task).unwrap())
+    Ok(new_task)
 }
 
-pub fn build_tasks() -> Result<Vec<Task>, Box<dyn std::error::Error>> {
+pub async fn build_tasks() -> Result<Vec<Task>, Box<dyn std::error::Error>> {
     GLOBAL_MAP
         .lock()
-        .unwrap()
+        .await
         .iter()
         .map(|(name, config)| {
             let naive_dt = config.start_date.and_time(config.update_time);
@@ -588,8 +603,8 @@ pub async fn process_tasks<'a>(
 
     while !queue.is_empty() || !in_progress.is_empty() {
         while in_progress.len() < concurrency_limit && !queue.is_empty() {
-            let task_ref = queue.dequeue().unwrap();
-            in_progress.push(process_task(task_ref));
+            let task = queue.dequeue().unwrap();
+            in_progress.push(process_task(task));
         }
         if let Some(result) = in_progress.next().await {
             queue.enqueue(result?);

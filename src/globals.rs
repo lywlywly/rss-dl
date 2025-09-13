@@ -1,6 +1,7 @@
 use crate::types::{Config, SeriesConfig};
 use once_cell::sync::Lazy;
-use std::{collections::HashMap, fs, sync::Mutex};
+use std::{collections::HashMap, fs};
+use tokio::sync::Mutex;
 
 pub static GLOBAL_MAP: Lazy<Mutex<HashMap<String, SeriesConfig>>> = Lazy::new(|| {
     let contents = fs::read_to_string("tasks.yaml").expect("Failed to read tasks.yaml");
